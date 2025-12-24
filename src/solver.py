@@ -5,6 +5,10 @@ from fractions import Fraction
 from math import isqrt
 from typing import List, Optional, Tuple
 
+Token = Tuple[str, str]
+Tokens = List[Token]
+Poly = dict[int, Fraction]
+
 
 @dataclass(frozen=True)
 class Num:
@@ -57,8 +61,12 @@ class ParseError(ValueError):
     pass
 
 
-def tokenize(s: str) -> List[Tuple[str, str]]:
-    tokens: List[Tuple[str, str]] = []
+ADD_OPS = {"+", "-"}
+MUL_OPS = {"*", "/"}
+
+
+def tokenize(s: str) -> Tokens:
+    tokens: Tokens = []
     i = 0
     while i < len(s):
         ch = s[i]
@@ -89,10 +97,10 @@ def tokenize(s: str) -> List[Tuple[str, str]]:
     return insert_implicit_mul(tokens)
 
 
-def insert_implicit_mul(tokens: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+def insert_implicit_mul(tokens: Tokens) -> Tokens:
     if not tokens:
         return tokens
-    out: List[Tuple[str, str]] = [tokens[0]]
+    out: Tokens = [tokens[0]]
     for prev, curr in zip(tokens, tokens[1:]):
         if needs_implicit_mul(prev, curr):
             out.append(("OP", "*"))
@@ -100,32 +108,30 @@ def insert_implicit_mul(tokens: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
     return out
 
 
-def needs_implicit_mul(prev: Tuple[str, str], curr: Tuple[str, str]) -> bool:
+def needs_implicit_mul(prev: Token, curr: Token) -> bool:
     prev_type, prev_val = prev
     curr_type, curr_val = curr
     if prev_type == "NUMBER":
         if curr_type in ("IDENT", "LPAREN"):
-            if curr_val != "=" and prev_val != "=":
-                return True
+            return curr_val != "=" and prev_val != "="
         return False
     if prev_type in ("IDENT", "RPAREN"):
         if curr_type in ("NUMBER", "IDENT", "LPAREN"):
-            if curr_val != "=" and prev_val != "=":
-                return True
+            return curr_val != "=" and prev_val != "="
     return False
 
 
 class Parser:
-    def __init__(self, tokens: List[Tuple[str, str]]):
+    def __init__(self, tokens: Tokens):
         self.tokens = tokens
         self.pos = 0
 
-    def peek(self) -> Optional[Tuple[str, str]]:
+    def peek(self) -> Optional[Token]:
         if self.pos >= len(self.tokens):
             return None
         return self.tokens[self.pos]
 
-    def consume(self, kind: str, value: Optional[str] = None) -> Tuple[str, str]:
+    def consume(self, kind: str, value: Optional[str] = None) -> Token:
         tok = self.peek()
         if tok is None:
             raise ParseError("Unexpected end of input")
@@ -141,7 +147,7 @@ class Parser:
         node = self.parse_mul_div()
         while True:
             tok = self.peek()
-            if tok and tok[0] == "OP" and tok[1] in ("+", "-"):
+            if tok and tok[0] == "OP" and tok[1] in ADD_OPS:
                 self.consume("OP")
                 right = self.parse_mul_div()
                 node = BinOp(tok[1], node, right)
@@ -153,7 +159,7 @@ class Parser:
         node = self.parse_unary()
         while True:
             tok = self.peek()
-            if tok and tok[0] == "OP" and tok[1] in ("*", "/"):
+            if tok and tok[0] == "OP" and tok[1] in MUL_OPS:
                 self.consume("OP")
                 right = self.parse_unary()
                 node = BinOp(tok[1], node, right)
@@ -198,7 +204,7 @@ class Parser:
         raise ParseError(f"Unexpected token: {tok}")
 
 
-def parse_ratio(tokens: List[Tuple[str, str]]) -> Expr | Ratio:
+def parse_ratio(tokens: Tokens) -> Expr | Ratio:
     split_idx = find_top_level_op(tokens, ":")
     if split_idx is None:
         return parse_expr(tokens)
@@ -209,7 +215,7 @@ def parse_ratio(tokens: List[Tuple[str, str]]) -> Expr | Ratio:
     return Ratio(left, right)
 
 
-def parse_expr(tokens: List[Tuple[str, str]]) -> Expr:
+def parse_expr(tokens: Tokens) -> Expr:
     parser = Parser(tokens)
     expr = parser.parse_expression()
     if parser.peek() is not None:
@@ -217,7 +223,7 @@ def parse_expr(tokens: List[Tuple[str, str]]) -> Expr:
     return expr
 
 
-def find_top_level_op(tokens: List[Tuple[str, str]], op: str) -> Optional[int]:
+def find_top_level_op(tokens: Tokens, op: str) -> Optional[int]:
     depth = 0
     for i, (kind, val) in enumerate(tokens):
         if kind == "LPAREN":
@@ -229,7 +235,7 @@ def find_top_level_op(tokens: List[Tuple[str, str]], op: str) -> Optional[int]:
     return None
 
 
-def split_equation(tokens: List[Tuple[str, str]]) -> Optional[Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]]:
+def split_equation(tokens: Tokens) -> Optional[Tuple[Tokens, Tokens]]:
     idx = find_top_level_op(tokens, "=")
     if idx is None:
         return None
@@ -239,9 +245,7 @@ def split_equation(tokens: List[Tuple[str, str]]) -> Optional[Tuple[List[Tuple[s
 def is_numeric(expr: Expr) -> bool:
     if isinstance(expr, Num):
         return True
-    if isinstance(expr, Imag):
-        return False
-    if isinstance(expr, Var):
+    if isinstance(expr, (Imag, Var)):
         return False
     if isinstance(expr, Neg):
         return is_numeric(expr.expr)
@@ -261,8 +265,6 @@ def collect_ops(expr: Expr) -> set[str]:
         return collect_ops(expr.base) | collect_ops(expr.exponent) | {"^"}
     if isinstance(expr, Neg):
         return collect_ops(expr.expr)
-    if isinstance(expr, Imag):
-        return set()
     if isinstance(expr, Group):
         return collect_ops(expr.expr)
     return set()
@@ -387,7 +389,7 @@ def numeric_collapse_once(expr: Expr) -> Optional[Expr]:
         if contains_group(expr):
             return None
         ops = collect_ops(expr)
-        if ops <= {"+", "-"} or ops <= {"*", "/"}:
+        if ops <= ADD_OPS or ops <= MUL_OPS:
             return Num(eval_numeric(expr))
     return None
 
@@ -434,7 +436,7 @@ def simplify_once(expr: Expr) -> Optional[Expr]:
     collapsed = numeric_collapse_once(expr)
     if collapsed is not None:
         return collapsed
-    for ops in ({"*", "/"}, {"+", "-"}):
+    for ops in (MUL_OPS, ADD_OPS):
         reduced = reduce_first(expr, ops)
         if reduced is not None:
             return reduced
@@ -457,7 +459,7 @@ def find_vars(expr: Expr) -> set[str]:
     return set()
 
 
-def poly_add(p: dict[int, Fraction], q: dict[int, Fraction]) -> dict[int, Fraction]:
+def poly_add(p: Poly, q: Poly) -> Poly:
     out = dict(p)
     for deg, coef in q.items():
         out[deg] = out.get(deg, Fraction(0)) + coef
@@ -466,8 +468,8 @@ def poly_add(p: dict[int, Fraction], q: dict[int, Fraction]) -> dict[int, Fracti
     return out
 
 
-def poly_mul(p: dict[int, Fraction], q: dict[int, Fraction]) -> dict[int, Fraction]:
-    out: dict[int, Fraction] = {}
+def poly_mul(p: Poly, q: Poly) -> Poly:
+    out: Poly = {}
     for d1, c1 in p.items():
         for d2, c2 in q.items():
             d = d1 + d2
@@ -477,7 +479,7 @@ def poly_mul(p: dict[int, Fraction], q: dict[int, Fraction]) -> dict[int, Fracti
     return out
 
 
-def poly_from_expr(expr: Expr, var: str) -> Optional[dict[int, Fraction]]:
+def poly_from_expr(expr: Expr, var: str) -> Optional[Poly]:
     if isinstance(expr, Num):
         return {0: expr.value}
     if isinstance(expr, Var):
@@ -496,7 +498,7 @@ def poly_from_expr(expr: Expr, var: str) -> Optional[dict[int, Fraction]]:
     if isinstance(expr, BinOp):
         left = poly_from_expr(expr.left, var)
         right = poly_from_expr(expr.right, var)
-        if expr.op in ("+", "-"):
+        if expr.op in ADD_OPS:
             if left is None or right is None:
                 return None
             if expr.op == "-":
@@ -527,26 +529,20 @@ def poly_from_expr(expr: Expr, var: str) -> Optional[dict[int, Fraction]]:
         base = poly_from_expr(expr.base, var)
         if base is None:
             return None
-        result = {0: Fraction(1)}
+        result: Poly = {0: Fraction(1)}
         for _ in range(exp):
             result = poly_mul(result, base)
         return result
     return None
 
 
-def poly_degree(poly: dict[int, Fraction]) -> int:
+def poly_degree(poly: Poly) -> int:
     if not poly:
         return 0
     return max(poly.keys())
 
 
-def num(value: Fraction | int) -> Num:
-    if isinstance(value, Fraction):
-        return Num(value)
-    return Num(Fraction(value, 1))
-
-
-def add_num(expr: Expr, value: Fraction) -> Expr:
+def add_constant(expr: Expr, value: Fraction) -> Expr:
     if value >= 0:
         return BinOp("+", expr, Num(value))
     return BinOp("-", expr, Num(-value))
@@ -574,7 +570,7 @@ def sqrt_fraction(value: Fraction) -> Expr:
     return BinOp("*", Imag(), Pow(Num(pos), Num(Fraction(1, 2))))
 
 
-def build_poly_expr(coeffs: dict[int, Fraction], var: str) -> Expr:
+def build_poly_expr(coeffs: Poly, var: str) -> Expr:
     if not coeffs:
         return Num(Fraction(0))
     terms: List[Expr] = []
@@ -648,12 +644,12 @@ def quadratic_steps(a: Fraction, b: Fraction, c: Fraction, var: str) -> List[str
     steps.append(format_equation(left_complete, right_complete))
 
     disc = b * b - 4 * a * c
-    left_sq = Pow(add_num(x, half_b_over_a), Num(Fraction(2)))
+    left_sq = Pow(add_constant(x, half_b_over_a), Num(Fraction(2)))
     right_sq = Num(disc / (4 * a * a))
     steps.append(format_equation(left_sq, right_sq))
 
     sqrt_right = sqrt_fraction(disc / (4 * a * a))
-    steps.append(f"{format_expr(add_num(x, half_b_over_a))} = +/- {format_expr(sqrt_right)}")
+    steps.append(f"{format_expr(add_constant(x, half_b_over_a))} = +/- {format_expr(sqrt_right)}")
 
     center = Fraction(-b, 2 * a)
     steps.append(f"{format_expr(x)} = {format_number(center)} +/- {format_expr(sqrt_right)}")
@@ -685,7 +681,7 @@ def cubic_steps(a: Fraction, b: Fraction, c: Fraction, d: Fraction, var: str) ->
         )
 
     shift = b / (3 * a)
-    steps.append(f"{format_expr(x)} = {format_expr(add_num(t, -shift))}")
+    steps.append(f"{format_expr(x)} = {format_expr(add_constant(t, -shift))}")
 
     p = (3 * a * c - b * b) / (3 * a * a)
     q = (2 * b * b * b - 9 * a * b * c + 27 * a * a * d) / (27 * a * a * a)
@@ -743,7 +739,7 @@ def linear_form(expr: Expr) -> Optional[Tuple[Fraction, Fraction, Optional[str]]
     if isinstance(expr, Pow):
         return None
     if isinstance(expr, BinOp):
-        if expr.op in ("+", "-"):
+        if expr.op in ADD_OPS:
             left = linear_form(expr.left)
             right = linear_form(expr.right)
             if left is None or right is None:
@@ -756,7 +752,7 @@ def linear_form(expr: Expr) -> Optional[Tuple[Fraction, Fraction, Optional[str]]
             if expr.op == "+":
                 return a1 + a2, b1 + b2, v
             return a1 - a2, b1 - b2, v
-        if expr.op in ("*", "/"):
+        if expr.op in MUL_OPS:
             left = linear_form(expr.left)
             right = linear_form(expr.right)
             if left is None or right is None:
@@ -784,18 +780,16 @@ def format_number(value: Fraction) -> str:
 
 
 def precedence(expr: Expr) -> int:
-    if isinstance(expr, Num) or isinstance(expr, Var) or isinstance(expr, Imag):
+    if isinstance(expr, (Num, Var, Imag)):
         return 4
-    if isinstance(expr, Neg):
+    if isinstance(expr, (Neg, Group)):
         return 4
     if isinstance(expr, Pow):
         return 3
     if isinstance(expr, BinOp):
-        if expr.op in ("*", "/"):
+        if expr.op in MUL_OPS:
             return 2
         return 1
-    if isinstance(expr, Group):
-        return 4
     return 0
 
 
@@ -922,10 +916,9 @@ def solve_linear_equation_steps(left: Expr, right: Expr) -> Optional[List[Tuple[
         return steps
 
     left_var = BinOp("*", Num(a), Var(var)) if a != 1 else Var(var)
-    right_expr: Expr
     if b != 0:
         if b > 0:
-            right_expr = BinOp("-", Num(b2), Num(b1))
+            right_expr: Expr = BinOp("-", Num(b2), Num(b1))
         else:
             right_expr = BinOp("+", Num(b2), Num(-b1))
     else:
@@ -948,8 +941,12 @@ def solve_linear_equation_steps(left: Expr, right: Expr) -> Optional[List[Tuple[
 def solve_ratio_equation_steps(left: Ratio, right: Ratio) -> List[Tuple[Expr, Expr]]:
     cross_left = BinOp("*", left.right, right.left)
     cross_right = BinOp("*", left.left, right.right)
-    steps = [(cross_left, cross_right)]
-    return steps
+    return [(cross_left, cross_right)]
+
+
+def append_unique(lines: List[str], value: str) -> None:
+    if not lines or lines[-1] != value:
+        lines.append(value)
 
 
 def solve(input_str: str) -> List[str]:
@@ -962,9 +959,7 @@ def solve(input_str: str) -> List[str]:
         expr_steps = solve_expression_steps(expr)
         lines: List[str] = []
         for step in expr_steps[1:]:
-            rendered = format_expr(step)
-            if not lines or lines[-1] != rendered:
-                lines.append(rendered)
+            append_unique(lines, format_expr(step))
         return lines
 
     left_tokens, right_tokens = split
@@ -975,15 +970,11 @@ def solve(input_str: str) -> List[str]:
     if isinstance(left_expr, Ratio) and isinstance(right_expr, Ratio):
         ratio_steps = solve_ratio_equation_steps(left_expr, right_expr)
         for l, r in ratio_steps:
-            rendered = format_equation(l, r)
-            if not steps or steps[-1] != rendered:
-                steps.append(rendered)
+            append_unique(steps, format_equation(l, r))
         left_expr, right_expr = ratio_steps[-1]
         simplified_steps = simplify_equation_sides(left_expr, right_expr)
         for l, r in simplified_steps:
-            rendered = format_equation(l, r)
-            if not steps or steps[-1] != rendered:
-                steps.append(rendered)
+            append_unique(steps, format_equation(l, r))
         if simplified_steps:
             left_expr, right_expr = simplified_steps[-1]
 
@@ -1015,17 +1006,13 @@ def solve(input_str: str) -> List[str]:
             if is_numeric(last_left) and isinstance(last_right, Var):
                 linear_steps.append((last_right, last_left))
         for l, r in linear_steps:
-            rendered = format_equation(l, r)
-            if not steps or steps[-1] != rendered:
-                steps.append(rendered)
+            append_unique(steps, format_equation(l, r))
         return steps
 
     left_steps = solve_expression_steps(left_expr)
     right_steps = solve_expression_steps(right_expr)
     for l, r in zip(left_steps[1:], right_steps[1:]):
-        rendered = format_equation(l, r)
-        if not steps or steps[-1] != rendered:
-            steps.append(rendered)
+        append_unique(steps, format_equation(l, r))
     return steps
 
 
