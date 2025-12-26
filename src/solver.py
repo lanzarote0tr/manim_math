@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from fractions import Fraction
 from math import isqrt
+import re
 from typing import List, Optional, Tuple
 
 Token = Tuple[str, str]
@@ -59,6 +60,9 @@ Expr = Num | Var | Neg | BinOp | Pow | Group | Imag
 
 class ParseError(ValueError):
     pass
+
+
+FUNC_DEF_RE = re.compile(r"^\s*([A-Za-z])\s*\(\s*([A-Za-z])\s*\)\s*=\s*(.+)\s*$")
 
 
 ADD_OPS = {"+", "-"}
@@ -776,7 +780,11 @@ def linear_form(expr: Expr) -> Optional[Tuple[Fraction, Fraction, Optional[str]]
 def format_number(value: Fraction) -> str:
     if value.denominator == 1:
         return str(value.numerator)
-    return f"{value.numerator}/{value.denominator}"
+    num = value.numerator
+    den = value.denominator
+    if num < 0:
+        return rf"-\frac{{{abs(num)}}}{{{den}}}"
+    return rf"\frac{{{num}}}{{{den}}}"
 
 
 def precedence(expr: Expr) -> int:
@@ -833,15 +841,30 @@ def format_expr(expr: Expr) -> str:
         ):
             right = f"({right})"
         if expr.op == "*":
+            if isinstance(expr.left, Imag):
+                if isinstance(expr.right, Neg):
+                    inner = format_expr(expr.right.expr)
+                    if precedence(expr.right.expr) < precedence(expr):
+                        inner = f"({inner})"
+                    return f"-{inner}i"
+                return f"{right}i"
             if isinstance(expr.left, Num):
                 if expr.left.value == 1:
                     return right
                 if expr.left.value == -1:
                     return f"-{right}"
-                if isinstance(expr.right, (Var, BinOp, Neg, Imag, Pow)):
-                    return f"{left}{right}"
-            if isinstance(expr.left, Var) and isinstance(expr.right, BinOp):
-                return f"{left}{right}"
+            if isinstance(expr.left, Num) and isinstance(expr.right, Neg):
+                inner = format_expr(expr.right.expr)
+                if precedence(expr.right.expr) < precedence(expr):
+                    inner = f"({inner})"
+                return f"-{left}{inner}"
+            if isinstance(expr.right, Neg):
+                right = f"({right})"
+            if isinstance(expr.left, Num) and isinstance(expr.right, Num):
+                return rf"{left} \times {right}"
+            return f"{left}{right}"
+        if expr.op == "/":
+            return rf"\frac{{{left}}}{{{right}}}"
         return f"{left} {expr.op} {right}"
     raise ValueError("Unknown expression")
 
@@ -949,7 +972,49 @@ def append_unique(lines: List[str], value: str) -> None:
         lines.append(value)
 
 
-def solve(input_str: str) -> List[str]:
+def _split_input_parts(input_str: str) -> List[str]:
+    parts: List[str] = []
+    for line in input_str.splitlines():
+        for chunk in line.split(";"):
+            chunk = chunk.strip()
+            if chunk:
+                parts.append(chunk)
+    return parts
+
+
+def _extract_function_definitions(input_str: str) -> Tuple[List[Tuple[str, str, str]], str]:
+    defs: List[Tuple[str, str, str]] = []
+    parts = _split_input_parts(input_str)
+    remaining: List[str] = []
+    for part in parts:
+        match = FUNC_DEF_RE.match(part)
+        if match:
+            name, arg, body = match.group(1), match.group(2), match.group(3).strip()
+            defs.append((name, arg, body))
+        else:
+            remaining.append(part)
+    main_expr = remaining[-1] if remaining else ""
+    return defs, main_expr
+
+
+def _pick_placeholder(used: set[str]) -> str:
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        if letter not in used:
+            return letter
+    return "Z"
+
+
+def _replace_func_calls(expr: str, name: str, arg: str, replacement: str) -> str:
+    pattern = re.compile(rf"{re.escape(name)}\s*\(\s*{re.escape(arg)}\s*\)")
+    return pattern.sub(replacement, expr)
+
+
+def _replace_placeholder_steps(steps: List[str], placeholder: str, name: str, arg: str) -> List[str]:
+    pattern = re.compile(rf"(?<![A-Za-z]){re.escape(placeholder)}(?![A-Za-z])")
+    return [pattern.sub(f"{name}({arg})", step) for step in steps]
+
+
+def _solve_raw(input_str: str) -> List[str]:
     tokens = tokenize(input_str)
     split = split_equation(tokens)
     if split is None:
@@ -1014,6 +1079,40 @@ def solve(input_str: str) -> List[str]:
     for l, r in zip(left_steps[1:], right_steps[1:]):
         append_unique(steps, format_equation(l, r))
     return steps
+
+
+def solve(input_str: str) -> List[str]:
+    defs, main_expr = _extract_function_definitions(input_str)
+    if not defs:
+        return _solve_raw(main_expr)
+
+    used = set(re.findall(r"[A-Za-z]", main_expr))
+    placeholders: List[Tuple[str, str, str, str]] = []
+    phase1_expr = main_expr
+    for name, arg, body in defs:
+        placeholder = _pick_placeholder(used)
+        used.add(placeholder)
+        placeholders.append((name, arg, body, placeholder))
+        phase1_expr = _replace_func_calls(phase1_expr, name, arg, placeholder)
+
+    phase1_steps = _solve_raw(phase1_expr)
+    for name, arg, _body, placeholder in placeholders:
+        phase1_steps = _replace_placeholder_steps(phase1_steps, placeholder, name, arg)
+
+    phase2_expr = main_expr
+    for name, arg, body, _placeholder in placeholders:
+        phase2_expr = _replace_func_calls(phase2_expr, name, arg, f"({body})")
+
+    phase2_steps = _solve_raw(phase2_expr)
+
+    combined: List[str] = []
+    for step in phase1_steps:
+        append_unique(combined, step)
+    for name, arg, body, _placeholder in placeholders:
+        append_unique(combined, f"{name}({arg}) = {body}")
+    for step in phase2_steps:
+        append_unique(combined, step)
+    return combined
 
 
 def main() -> None:
