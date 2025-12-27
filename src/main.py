@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-import sys
 from typing import List, Tuple
 
 from manim import (
@@ -72,16 +71,30 @@ def to_latex(text: str) -> str:
 class SolveScene(Scene):
     def construct(self) -> None:
         expr = os.environ.get(EXPR_ENV, DEFAULT_EXPR)
+        display_expr = os.environ.get("MANIM_RENDER_EXPR", expr)
+        def_tex = os.environ.get("MANIM_DEF_TEX", "")
+        def_line = os.environ.get("MANIM_DEF_LINE", "")
         anim_run_time = 1.2
         final_wait = 2.0
 
         title = Text("Step: 0", font="Noto Sans", weight="BOLD")
         title.scale(0.45).to_edge(UP, buff=0.1)
 
-        label = MathTex(to_latex(expr))
-        self._fit_to_frame(label)
+        def_mob = None
+        if def_tex:
+            def_mob = MathTex(def_tex)
+            self._fit_to_frame(def_mob)
+            def_mob.next_to(title, DOWN, buff=0.2)
 
-        self.play(FadeIn(title), FadeIn(label), run_time=anim_run_time)
+        label = MathTex(to_latex(display_expr))
+        self._fit_to_frame(label)
+        if def_mob is not None:
+            label.next_to(def_mob, DOWN, buff=0.35)
+
+        if def_mob is not None:
+            self.play(FadeIn(title), FadeIn(def_mob), FadeIn(label), run_time=anim_run_time)
+        else:
+            self.play(FadeIn(title), FadeIn(label), run_time=anim_run_time)
 
         try:
             steps = solve(expr)
@@ -98,11 +111,26 @@ class SolveScene(Scene):
             self.wait(final_wait)
             return
 
-        for i, line in enumerate(steps, start=1):
+        render_steps = steps
+        phase1_len = 0
+        if def_line:
+            def_norm = re.sub(r"\s+", "", def_line)
+            for idx, line in enumerate(steps):
+                if re.sub(r"\s+", "", line) == def_norm:
+                    phase1_len = idx
+                    render_steps = steps[:idx] + steps[idx + 1 :]
+                    break
+
+        for i, line in enumerate(render_steps, start=1):
+            if def_mob is not None and i == phase1_len + 1:
+                self.play(FadeOut(def_mob), run_time=anim_run_time)
+                def_mob = None
             new_title = Text(f"Step: {i}", font="Noto Sans", weight="BOLD")
             new_title.scale(0.45).to_edge(UP, buff=0.1)
             new_label = MathTex(to_latex(line))
             self._fit_to_frame(new_label)
+            if def_mob is not None:
+                new_label.next_to(def_mob, DOWN, buff=0.35)
 
             self.play(
                 Transform(title, new_title),
@@ -137,19 +165,61 @@ def main() -> None:
     if not expr:
         expr = DEFAULT_EXPR
 
+    parts: List[str] = []
+    for line in expr.splitlines():
+        for chunk in line.split(";"):
+            chunk = chunk.strip()
+            if chunk:
+                parts.append(chunk)
+
+    def_re = re.compile(r"^\s*([A-Za-z])\s*\(\s*([A-Za-z])\s*\)\s*=\s*(.+)\s*$")
+    def_lines: List[str] = []
+    def_line_raw = ""
+    display_expr = expr
+    for part in parts:
+        match = def_re.match(part)
+        if match:
+            def_line_raw = def_line_raw or f"{match.group(1)}({match.group(2)}) = {match.group(3).strip()}"
+            def_lines.append(def_line_raw)
+        else:
+            display_expr = part
+
+    def_tex = ""
+    if def_lines:
+        def_tex = r"\begin{aligned} " + r" \\ ".join(to_latex(line) for line in def_lines) + r" \end{aligned}"
+
     try:
         steps = solve(expr)
     except ParseError as exc:
         print(f"DEBUG_RENDER_PARSE_ERROR: {exc}")
         steps = []
 
+    render_steps = steps
+    phase1_len = 0
+    if def_line_raw:
+        def_norm = re.sub(r"\s+", "", def_line_raw)
+        for idx, line in enumerate(steps):
+            if re.sub(r"\s+", "", line) == def_norm:
+                phase1_len = idx
+                render_steps = steps[:idx] + steps[idx + 1 :]
+                break
+
     print("DEBUG_RENDER_LIST:")
-    print(f"Step 0: {to_latex(expr)}")
-    for i, line in enumerate(steps, start=1):
+    if def_lines:
+        print(f"Step 0 (top): {to_latex(def_lines[0])}")
+        print(f"Step 0 (bottom): {to_latex(display_expr)}")
+    else:
+        print(f"Step 0: {to_latex(display_expr)}")
+    for i, line in enumerate(render_steps, start=1):
+        if def_lines and i == phase1_len + 1:
+            print("Step merge: function definition removed")
         print(f"Step {i}: {to_latex(line)}")
 
     env = os.environ.copy()
     env[EXPR_ENV] = expr
+    env["MANIM_RENDER_EXPR"] = display_expr
+    env["MANIM_DEF_TEX"] = def_tex
+    env["MANIM_DEF_LINE"] = def_line_raw
 
     cmd: List[str] = ["manim", "-pqh", os.path.abspath(__file__), "SolveScene"]
     subprocess.run(cmd, check=False, env=env)

@@ -65,6 +65,33 @@ class ParseError(ValueError):
 FUNC_DEF_RE = re.compile(r"^\s*([A-Za-z])\s*\(\s*([A-Za-z])\s*\)\s*=\s*(.+)\s*$")
 
 
+def _linear_term(expr: Expr) -> Optional[Tuple[Fraction, Var]]:
+    if isinstance(expr, Var):
+        return Fraction(1), expr
+    if isinstance(expr, Neg):
+        inner = _linear_term(expr.expr)
+        if inner is None:
+            return None
+        coef, var = inner
+        return -coef, var
+    if isinstance(expr, BinOp) and expr.op == "*":
+        if isinstance(expr.left, Num) and isinstance(expr.right, Var):
+            return expr.left.value, expr.right
+        if isinstance(expr.right, Num) and isinstance(expr.left, Var):
+            return expr.right.value, expr.left
+    return None
+
+
+def _build_linear_term(coef: Fraction, var: Var) -> Expr:
+    if coef == 0:
+        return Num(Fraction(0))
+    if coef == 1:
+        return var
+    if coef == -1:
+        return Neg(var)
+    return BinOp("*", Num(coef), var)
+
+
 ADD_OPS = {"+", "-"}
 MUL_OPS = {"*", "/"}
 
@@ -328,11 +355,19 @@ def algebra_simplify(expr: Expr) -> Optional[Expr]:
         left = expr.left
         right = expr.right
         if expr.op == "+":
+            left_term = _linear_term(left)
+            right_term = _linear_term(right)
+            if left_term and right_term and left_term[1] == right_term[1]:
+                return _build_linear_term(left_term[0] + right_term[0], left_term[1])
             if isinstance(left, Num) and left.value == 0:
                 return right
             if isinstance(right, Num) and right.value == 0:
                 return left
         if expr.op == "-":
+            left_term = _linear_term(left)
+            right_term = _linear_term(right)
+            if left_term and right_term and left_term[1] == right_term[1]:
+                return _build_linear_term(left_term[0] - right_term[0], left_term[1])
             if isinstance(right, Num) and right.value == 0:
                 return left
             if isinstance(left, Num) and left.value == 0:
@@ -563,6 +598,8 @@ def sqrt_fraction(value: Fraction) -> Expr:
         if num_root * num_root == num and den_root * den_root == den:
             return Num(Fraction(num_root, den_root))
         if den_root * den_root == den:
+            if den_root == 1:
+                return Pow(Num(num), Num(Fraction(1, 2)))
             return BinOp("/", Pow(Num(num), Num(Fraction(1, 2))), Num(den_root))
         return Pow(Num(value), Num(Fraction(1, 2)))
     pos = -value
@@ -570,6 +607,8 @@ def sqrt_fraction(value: Fraction) -> Expr:
     den = pos.denominator
     den_root = isqrt(den)
     if den_root * den_root == den:
+        if den_root == 1:
+            return BinOp("*", Imag(), Pow(Num(num), Num(Fraction(1, 2))))
         return BinOp("*", Imag(), BinOp("/", Pow(Num(num), Num(Fraction(1, 2))), Num(den_root)))
     return BinOp("*", Imag(), Pow(Num(pos), Num(Fraction(1, 2))))
 
@@ -864,6 +903,8 @@ def format_expr(expr: Expr) -> str:
                 return rf"{left} \times {right}"
             return f"{left}{right}"
         if expr.op == "/":
+            if isinstance(expr.right, Num) and expr.right.value == 1:
+                return left
             return rf"\frac{{{left}}}{{{right}}}"
         return f"{left} {expr.op} {right}"
     raise ValueError("Unknown expression")
@@ -970,6 +1011,36 @@ def solve_ratio_equation_steps(left: Ratio, right: Ratio) -> List[Tuple[Expr, Ex
 def append_unique(lines: List[str], value: str) -> None:
     if not lines or lines[-1] != value:
         lines.append(value)
+
+
+def _simplify_expr(expr: Expr, max_steps: int = 20) -> Expr:
+    current = expr
+    for _ in range(max_steps):
+        new = simplify_once(current)
+        if new is None or new == current:
+            break
+        current = new
+    return current
+
+
+def _normalize_equation_str(expr_str: str) -> Optional[str]:
+    tokens = tokenize(expr_str)
+    split = split_equation(tokens)
+    if split is None:
+        return None
+    left_tokens, right_tokens = split
+    left_expr = parse_ratio(left_tokens)
+    right_expr = parse_ratio(right_tokens)
+    if isinstance(left_expr, Ratio):
+        left_expr = BinOp("/", left_expr.left, left_expr.right)
+    if isinstance(right_expr, Ratio):
+        right_expr = BinOp("/", right_expr.left, right_expr.right)
+
+    left_expr = _simplify_expr(left_expr)
+    right_expr = _simplify_expr(right_expr)
+    merged = BinOp("+", left_expr, Neg(right_expr))
+    merged = _simplify_expr(merged)
+    return format_equation(merged, Num(Fraction(0)))
 
 
 def _split_input_parts(input_str: str) -> List[str]:
@@ -1099,9 +1170,20 @@ def solve(input_str: str) -> List[str]:
     for name, arg, _body, placeholder in placeholders:
         phase1_steps = _replace_placeholder_steps(phase1_steps, placeholder, name, arg)
 
-    phase2_expr = main_expr
+    normalized = _normalize_equation_str(phase1_expr)
+    if normalized:
+        for name, arg, _body, placeholder in placeholders:
+            normalized = _replace_placeholder_steps([normalized], placeholder, name, arg)[0]
+        append_unique(phase1_steps, normalized)
+
+    anchor_expr = phase1_steps[-1] if phase1_steps else main_expr
+    phase2_expr = anchor_expr
     for name, arg, body, _placeholder in placeholders:
         phase2_expr = _replace_func_calls(phase2_expr, name, arg, f"({body})")
+    if phase2_expr == anchor_expr:
+        phase2_expr = main_expr
+        for name, arg, body, _placeholder in placeholders:
+            phase2_expr = _replace_func_calls(phase2_expr, name, arg, f"({body})")
 
     phase2_steps = _solve_raw(phase2_expr)
 
@@ -1110,6 +1192,8 @@ def solve(input_str: str) -> List[str]:
         append_unique(combined, step)
     for name, arg, body, _placeholder in placeholders:
         append_unique(combined, f"{name}({arg}) = {body}")
+    if phase2_expr:
+        append_unique(combined, phase2_expr)
     for step in phase2_steps:
         append_unique(combined, step)
     return combined
